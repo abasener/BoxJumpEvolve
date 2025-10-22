@@ -1,0 +1,14 @@
+# Claude Code files
+.claude/
+
+# Generated files
+evolution_progress.png
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
