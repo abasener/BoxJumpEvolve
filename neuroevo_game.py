@@ -19,12 +19,72 @@ BASE_SPEED = 5  # pixels per frame (increased from 2 for faster runs)
 BASE_TIME_FRAMES = (SCREEN_WIDTH - 100 - START_X) / BASE_SPEED  # frames to reach goal
 TIMEOUT_FRAMES = int(BASE_TIME_FRAMES * 1.1)  # +10% buffer
 
-# --- Level elements (spaced out more for wider screen) ---
-STANDARD_GAP_WIDTH = 60  # Standard gap size for physics calculations
-gaps = [(300, STANDARD_GAP_WIDTH), (900, STANDARD_GAP_WIDTH)]  # Spread out gaps (was 200, 500)
-walls = [(600, 30)]  # Moved wall to middle (was 350)
-platforms = [(1100, 40, 60)]  # Moved platform further (was 600)
+# --- MAP SELECTION ---
+MAP_DIFFICULTY = "MEDIUM"  # Options: "BASELINE", "MEDIUM", "HARD"
+
+# Standard gap size for physics calculations
+STANDARD_GAP_WIDTH = 60
+
+# --- Level Definitions ---
+def load_map(difficulty):
+    """Load level elements based on difficulty."""
+    if difficulty == "BASELINE":
+        # Original level - basic obstacle course
+        return {
+            'gaps': [(300, STANDARD_GAP_WIDTH), (900, STANDARD_GAP_WIDTH)],
+            'walls': [(600, 30)],
+            'platforms': [(1100, 40, 60)]  # (x, height, width)
+        }
+
+    elif difficulty == "MEDIUM":
+        # Medium - teaches consequence of missing jumps
+        # Features: Platform over gap, wall-jump combo, narrow landing
+        return {
+            'gaps': [
+                (250, STANDARD_GAP_WIDTH),      # Gap 1: basic jump
+                (650, 120),                      # Gap 2: WIDE - must use platform to cross
+                (1050, STANDARD_GAP_WIDTH)       # Gap 3: basic jump after platform
+            ],
+            'walls': [
+                (450, 30)                        # Wall before wide gap
+            ],
+            'platforms': [
+                (700, 45, 80)                    # Platform in middle of wide gap - must land here
+            ]
+        }
+
+    elif difficulty == "HARD":
+        # Hard - requires rhythm and precision
+        # Features: Triple jump, stacked walls, precise platforming
+        return {
+            'gaps': [
+                (200, 50),                       # Gap 1: narrow
+                (350, 50),                       # Gap 2: narrow - quick double jump!
+                (500, 50),                       # Gap 3: narrow - triple jump rhythm!
+                (900, 100)                       # Gap 4: wide - must use platform
+            ],
+            'walls': [
+                (700, 20),                       # Wall 1 (short)
+                (730, 20)                        # Wall 2 (stacked next to wall 1) - must jump on wall 1 then over wall 2
+            ],
+            'platforms': [
+                (950, 50, 60),                   # High platform over wide gap
+                (700, 40, 20)                    # Platform on top of wall 1 (auto-created for landing)
+            ]
+        }
+
+    else:
+        raise ValueError(f"Unknown difficulty: {difficulty}")
+
+# Load the selected map
+level_data = load_map(MAP_DIFFICULTY)
+gaps = level_data['gaps']
+walls = level_data['walls']
+platforms = level_data['platforms']
 GOAL_X = SCREEN_WIDTH - 100
+
+# Set window title with map difficulty
+pygame.display.set_caption(f"BoxJumpEvolve - {MAP_DIFFICULTY}")
 
 # Calculate jump velocity needed to clear 1.5x standard gap
 # Physics: with gravity = 0.5, horizontal speed = BASE_SPEED
@@ -57,6 +117,29 @@ def draw_generation_info(gen, alive_count, time_remaining):
     # Convert frames to seconds for display
     seconds_remaining = time_remaining / 30.0
     screen.blit(font.render(f"Time: {seconds_remaining:.1f}s", True, (0, 0, 0)), (10, 70))
+
+def draw_cancel_button(mouse_pos):
+    """Draw a cancel button in top right corner and return True if clicked."""
+    button_x = SCREEN_WIDTH - 110
+    button_y = 10
+    button_width = 100
+    button_height = 30
+
+    # Check if mouse is over button
+    mouse_over = (button_x <= mouse_pos[0] <= button_x + button_width and
+                  button_y <= mouse_pos[1] <= button_y + button_height)
+
+    # Draw button (red if mouse over, gray otherwise)
+    color = (200, 50, 50) if mouse_over else (150, 150, 150)
+    pygame.draw.rect(screen, color, (button_x, button_y, button_width, button_height))
+    pygame.draw.rect(screen, (0, 0, 0), (button_x, button_y, button_width, button_height), 2)  # Border
+
+    # Draw text
+    button_text = font.render("CANCEL", True, (255, 255, 255))
+    text_rect = button_text.get_rect(center=(button_x + button_width // 2, button_y + button_height // 2))
+    screen.blit(button_text, text_rect)
+
+    return button_x, button_y, button_width, button_height
 
 # --- Neural Network ---
 class NeuralNetwork:
@@ -261,12 +344,13 @@ class Agent:
             pygame.draw.rect(screen, self.color, (self.x, self.y, 20, 20))
 
 # --- Evolution ---
-def evolve(population, retain=0.2, mutate_chance=0.9, base_mutation=0.8, fresh_blood_rate=0.1):
+def evolve(population, retain=0.4, mutate_chance=0.9, base_mutation=0.8, fresh_blood_rate=0.1):
     population.sort(key=lambda a: a.fitness, reverse=True)
     survivors = population[:int(len(population) * retain)]
 
-    # ELITISM: Always keep the best agent unchanged
+    # ELITISM: Always keep the best agent completely unchanged (no mutation ever)
     children = [Agent(brain=population[0].nn.clone())]
+    elite_count = 1  # Track how many elite agents we've added
 
     # Add some completely random agents for diversity (fresh blood)
     num_fresh = int(len(population) * fresh_blood_rate)
@@ -287,6 +371,8 @@ def evolve(population, retain=0.2, mutate_chance=0.9, base_mutation=0.8, fresh_b
         # Select parent based on fitness (better = more likely)
         parent = random.choices(survivors, weights=selection_weights, k=1)[0]
         clone = parent.nn.clone()
+
+        # MUTATE: Apply mutations to all non-elite children
         # Use actual distance (x position) for mutation calculation, not fitness with bonus
         score_ratio = parent.x / GOAL_X
         score_ratio = max(0.01, min(score_ratio, 1.0))
@@ -302,15 +388,39 @@ def evolve(population, retain=0.2, mutate_chance=0.9, base_mutation=0.8, fresh_b
 
 # --- Simulation Loop ---
 def run_generation(pop_size=20, generation_number=0):
+    """Create random agents and run generation (used for generation 0 only)"""
     agents = [Agent() for _ in range(pop_size)]
-    for idx, agent in enumerate(agents):
+    return run_generation_with_agents(agents, generation_number)
 
-        agent.color = (100, 100 + int(155 * idx / pop_size), 255)  # light to deeper blue
+def run_generation_with_agents(agents, generation_number=0):
+    """Run a generation with the provided agents (used for evolved populations)"""
+    for idx, agent in enumerate(agents):
+        agent.color = (100, 100 + int(155 * idx / len(agents)), 255)  # light to deeper blue
     running = True
     ticks = 0
 
     while running:
         clock.tick(30)
+
+        # Handle events (close window, button clicks)
+        mouse_pos = pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                print("\nSimulation cancelled by user (window close)")
+                pygame.quit()
+                exit()
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # Check if cancel button was clicked
+                button_x = SCREEN_WIDTH - 110
+                button_y = 10
+                button_width = 100
+                button_height = 30
+                if (button_x <= event.pos[0] <= button_x + button_width and
+                    button_y <= event.pos[1] <= button_y + button_height):
+                    print("\nSimulation cancelled by user (cancel button)")
+                    pygame.quit()
+                    exit()
+
         draw_level()
         alive_agents = [a for a in agents if a.alive]
 
@@ -322,6 +432,7 @@ def run_generation(pop_size=20, generation_number=0):
             time_remaining = 0
 
         draw_generation_info(generation_number, len(alive_agents), time_remaining)
+        draw_cancel_button(mouse_pos)  # Draw cancel button
 
         if not alive_agents or ticks > 1000:
             break
@@ -403,7 +514,8 @@ for gen in range(1, NUM_GENERATIONS + 1):
     agents = evolve(agents)
     for agent in agents:
         agent.reset()
-    agents = run_generation(POP_SIZE, generation_number=gen)
+    # Run the evolved agents (not random new ones!)
+    agents = run_generation_with_agents(agents, generation_number=gen)
 
 # Save the plot after all generations complete
 save_fitness_plot(generation_numbers, avg_distances_history, max_distances_history, survival_count_history)
